@@ -1,4 +1,4 @@
-# ProVerif script for formal verification of the QUIC protocol
+# ProVerif script for the formal verification of the QUIC protocol
 
 This archive contains the ProVerif script for analyzing the QACCE security
 of the QUIC protocol. This result was first presented at [1]. 
