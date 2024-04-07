@@ -1,0 +1,404 @@
+
+#ifdef SELFUN
+set selFun = SELFUN.
+#elif SECRECY
+set selFun = Nounifset.
+#endif
+
+(* types *)
+type nonce_t.
+type G. (* DH *)
+type exponent. (* DH *)
+type nat.
+
+(* constants *)
+const bot: bitstring.
+const n0: bitstring. (* 0x00 *)
+const n1: bitstring. (* 1 *)
+const str_qscfg: bitstring. (* "QUIC server config signature" *)
+const null: bitstring. (* the null bitstring *)
+
+const q_reveal: bitstring.
+const q_corrupt: bitstring.
+
+const phase_initial_data_exchange: bitstring.
+const phase_initial_key_agreement: bitstring.
+const phase_data_exchange: bitstring.
+const phase_key_agreement: bitstring.
+const role_server: bitstring.
+const role_client: bitstring.
+
+(* packet numbers *)
+fun seqno(bitstring): bitstring.
+
+(* time *)
+fun s(bitstring): bitstring.  (* successor (+1) function *)
+
+(* AEAD *)
+fun E(bitstring, bitstring, bitstring, bitstring): bitstring.
+fun Ef(bitstring, bitstring, bitstring, bitstring, bitstring): bitstring.
+reduc
+  forall k: bitstring, iv: bitstring, h: bitstring, m: bitstring;
+  D(k, iv, h, E(k, iv, m, h)) = m;
+  forall k: bitstring, iv: bitstring, h: bitstring, m: bitstring, r: bitstring;
+  D(k, iv, h, Ef(k, iv, m, h, r)) = m.
+reduc
+  forall m: bitstring, nonce: bitstring, k: bitstring, h: bitstring;
+  extract_nonce(E(k, nonce, m, h)) = nonce;
+  forall m: bitstring, nonce: bitstring, k: bitstring, h: bitstring, r: bitstring;
+  extract_nonce(Ef(k, nonce, m, h, r)) = nonce.
+reduc
+  forall m: bitstring, nonce: bitstring, k: bitstring, h: bitstring;
+  extract_AD(E(k, nonce, m, h)) = h;
+  forall m: bitstring, nonce: bitstring, k: bitstring, h: bitstring, r: bitstring;
+  extract_AD(Ef(k, nonce, m, h, r)) = h.
+
+(* Signature *)
+fun pk(bitstring): bitstring.
+fun sk(bitstring): bitstring.
+fun Sign(bitstring, bitstring, nonce_t): bitstring.
+fun Ver(bitstring, bitstring, bitstring): bool
+reduc
+  forall rg: bitstring, m: bitstring, rs: nonce_t;
+  Ver(pk(rg), m, Sign(sk(rg), m, rs)) = true.
+
+(* Diffie-Hellman *)
+const q: nat. (* used just as a spaceholder *)
+const g: G.
+fun exp(G, exponent): G.
+nounif x: exponent; attacker(exp(g, x)). (* for speedup *)
+#ifdef NO_DH_COMM     /* define NO_DH_COMM if you want speedup */
+reduc
+  forall x: exponent, y: exponent;
+  expS(exp(g, y), x) = exp(exp(g, x), y).
+#else
+equation forall x: exponent, y: exponent;
+  exp(exp(g, x), y) = exp(exp(g, y), x).
+#define expS exp
+#endif
+
+(* Hash *)
+fun Hash(bitstring): bitstring.
+
+(* Generaiton of server's secret (for every time period) *)
+fun x_s(bitstring, bitstring): exponent [private].
+
+(* xtrct_xpnd  *)
+fun xtrct_xpnd(G, bitstring, bitstring, bitstring, bitstring): bitstring.
+fun k_c_of(bitstring): bitstring.
+fun k_s_of(bitstring): bitstring.
+fun iv_c_of(bitstring): bitstring.
+fun iv_s_of(bitstring): bitstring.
+
+
+free c: channel.
+#ifdef IP_SPOOFING
+free cp: channel [private]. (* for security against IP spoofing*)
+#else
+#define cp c
+#endif
+free secret: bitstring [private]. (* for sanity check *)
+
+(* table *)
+table conversations(bitstring).
+table clientIKAtable(bitstring).
+table serverIKAtable(bitstring).
+
+(* events and queries *)
+event revealed(bitstring, bitstring, bitstring).
+event corrupted(bitstring).
+
+event encrypt(bitstring, bitstring, bitstring, bitstring, bitstring).
+event decrypt(bitstring, bitstring, bitstring, bitstring, bitstring, bitstring).
+event client_k_set(bitstring, bitstring, bitstring).
+event server_k_set(bitstring, bitstring).
+
+event serverKeyAgreementFinished(bitstring, bitstring, bitstring,
+      bitstring, bitstring, bitstring, bitstring, G).
+
+event capture_m2(bitstring).
+event client_send_m3(bitstring).
+event server_accept_m3(bitstring, bitstring, bitstring).
+
+(*
+query attacker(secret).
+out(c, secret);   
+*)
+
+#if SERVER_IMPERSONATION
+(* Security against the server impersonation attack *)
+query conv: bitstring, sess: bitstring, S: bitstring;
+      event(client_k_set(conv, sess, S)) ==>
+      event(server_k_set(conv, sess))
+      || event(revealed(sess, phase_initial_data_exchange, role_server))
+      || event(corrupted(S)).
+#elif AUTHENTICITY
+(* Message authenticity of security
+   against the channel-corruption attack *)
+query S: bitstring, sess: bitstring, ph: bitstring, sender_role: bitstring,
+      C: bitstring, H: bitstring;
+      event(decrypt(S, sess, ph, sender_role, C, H)) ==>
+      event(encrypt(sess, ph, sender_role, C, H))
+      || event(revealed(sess, ph, sender_role))
+      || event(corrupted(S)).
+#elif IP_SPOOFING
+(* Security against IP spoofing attack *)
+#ifdef FIXED
+query S: bitstring, tk: bitstring, m3: bitstring;
+      event(server_accept_m3(S, tk, m3)) ==>
+      event(client_send_m3(tk))
+      || event(capture_m2(tk))
+      || event(corrupted(S)).
+#else
+query S: bitstring, m2: bitstring, m3: bitstring;
+      event(server_accept_m3(S, m2, m3)) ==>
+      event(client_send_m3(m3))
+      || event(capture_m2(m2))
+      || event(corrupted(S)).
+#endif /* FIXED */
+#elif SECRECY
+#define DISABLE_REVEAL 1
+#define DISABLE_CORRUPT 1
+#else
+#error "You must define one of the options SERVER_IMPERSONATION, AUTHENTICITY, SECRECY, and IP_SPOOFING!"
+#endif
+
+(* PROCESSES *)
+
+(* Encryption / Decription oracle *)
+let Oenc(matching_conversation: bitstring, 
+         key: bitstring, iv: bitstring,
+         sess: bitstring, ph: bitstring, sender_role: bitstring) =
+#ifdef SECRECY
+  in(c, (msg0: bitstring, msg1: bitstring, H: bitstring));
+  let msg = choice[msg0, msg1] in
+  let (cid: bitstring, sqn: bitstring) = H in
+  new r: bitstring;
+  let C = Ef(key, (iv, sqn), msg, H, r) in
+  get conversations(=matching_conversation) in
+#else /* SECRECY */
+  in(c, (msg: bitstring, H: bitstring));
+  let (cid: bitstring, sqn: bitstring) = H in
+  let C = E(key, (iv, sqn), msg, H) in
+  event encrypt(sess, ph, sender_role, C, H);
+#endif /* SECRECY */
+#if FIXED && (SECRECY || SERVER_IMPERSONATION)
+  if sqn = seqno(ph) then
+#endif /* FIXED && (SECRECY || SERVER_IMPERSONATION) */
+  out(c, (H, C)).
+
+let Odec(matching_conversation: bitstring, S: bitstring,
+         key: bitstring, iv: bitstring,
+         sess: bitstring, ph: bitstring, sender_role: bitstring) =
+#ifdef SECRECY
+  0.
+#else /* SECRECY */
+  in(c, (C: bitstring, H: bitstring));
+  let (cid': bitstring, sqn: bitstring) = H in
+  let nonce = (iv, sqn) in
+  let msg = D(key, nonce, H, C) in
+#if FIXED && AUTHENTICITY
+  if sqn = seqno(ph) then
+#endif /* FIXED && AUTHENTICITY */
+  get conversations(=matching_conversation) in
+  event decrypt(S, sess, ph, sender_role, C, H).
+#endif /* SECRECY */
+
+(* Responding reveal queries *)
+let Oreveal(sess: bitstring, ph: bitstring, sender_role: bitstring, k: bitstring) =
+#ifdef DISABLE_REVEAL
+ 0.
+#else
+  (in(c, =q_reveal); event revealed(sess, ph, sender_role); out(c, k)).
+#endif /* DISABLE_REVEAL */
+
+(* corruption *)
+let Ocorrupt(S: bitstring, s: bitstring) =
+#ifdef DISABLE_CORRUPT
+  0.
+#else
+  in(c, =q_corrupt);
+  event corrupted(S);
+  out(c, s).
+#endif /* DISABLE_CORRUPT */
+
+(* Client process *)
+let client(pk_s: bitstring, IP_c: bitstring, IP_s: bitstring,
+           port_c: bitstring, port_s: bitstring) =
+  (* Initial Key Agreement *)
+    (* m1 := c_i_hello(pk_s) *)
+  new cid: bitstring;
+  let m1 = (IP_c, IP_s, port_c, port_s, cid, seqno(phase_initial_key_agreement)) in
+  out(c, m1);
+    (* m2 *)
+  in(cp, m2: bitstring);
+  insert conversations((role_client, m1, m2));
+    (* m3 := c_hello(m2) *)
+  let (=IP_s, =IP_c, =port_s, =port_c, =cid, =seqno(phase_initial_key_agreement),
+       scfg_t_pub: bitstring, stk: bitstring) = m2 in
+  ! in(c, (current_time_c: bitstring, cid': bitstring));
+    (* m3 := c_hello(m2) *)
+    let (scid: bitstring, pub_s: bitstring, expy: bitstring, prof: bitstring) = scfg_t_pub in
+    if Ver(pk_s, (str_qscfg, n0, scid, pub_s, expy), prof) = true then
+    new r: bitstring;
+    let nonc = (current_time_c, r) in
+    new x_c: exponent;
+    let y_c = exp(g, x_c) in
+    let pub_c = (g, q, y_c) in
+    let pkt_info = (IP_c, IP_s, port_c, port_s) in
+    let (iv_stk: bitstring, tk: bitstring) = stk in
+    let m3 = (pkt_info, cid', seqno(phase_initial_key_agreement), stk, scid, nonc, pub_c) in
+#if FIXED && IP_SPOOFING
+    event client_send_m3(tk);
+#else
+    event client_send_m3(m3);
+#endif /* FIXED && IP_SPOOFING */
+    out(c, m3);
+    insert conversations((role_client, m1, m2, m3));
+      (* ik := get_i_key_c(m3) *)
+    let (=g, =q, y_s: G) = pub_s in
+    let ipms = exp(y_s, x_c) in
+    let ik = xtrct_xpnd(ipms, nonc, cid', m3, n1) in
+    ((* reveal *)
+     Oreveal(cid', phase_initial_data_exchange, role_client, k_s_of(ik)) |
+     Oreveal(cid', phase_initial_data_exchange, role_server, k_c_of(ik)) |
+     (* Initial Data Exchange *)
+     (! Oenc((role_server, m1, m2, m3),
+             k_s_of(ik), iv_s_of(ik), cid', phase_initial_data_exchange, role_client)) |
+     (! Odec((role_server, m1, m2, m3), pk_s,
+             k_c_of(ik), iv_c_of(ik), cid', phase_initial_data_exchange, role_server)) |
+     (* Key Agreement *)
+     (* m6 *)
+     in(c, m6: bitstring);
+       (* k := get_key_c(m6, sqn_s) *)
+     let sqn = seqno(phase_key_agreement) in
+     let (=IP_s, =IP_c, =port_s, =port_c, ((=cid', =sqn), e: bitstring)) = m6 in
+     let (=scfg_t_pub, pub_s': bitstring, =stk) = D(k_c_of(ik), (iv_c_of(ik), sqn), (cid', sqn), e) in
+     let (=g, =q, y_s': G) = pub_s' in
+     let pms = exp(y_s', x_c) in
+     let k = xtrct_xpnd(pms, nonc, cid', m6, n0) in
+#if FIXED && SERVER_IMPERSONATION
+     event client_k_set((role_server, m3, m6), cid', pk_s);
+#else
+     event client_k_set((role_server, m1, m2, m3, m6), cid', pk_s);
+#endif /* FIXED && SERVER_IMPERSONATION */
+     ((* reveal queries *)
+      Oreveal(cid', phase_data_exchange, role_client, k_s_of(k)) |
+      Oreveal(cid', phase_data_exchange, role_server, k_c_of(k)) |
+       (* Data Exchange *)
+      (! Oenc((role_server, m1, m2, m3, m6),
+               k_s_of(k), iv_s_of(k), cid', phase_data_exchange, role_client)) |
+      (! Odec((role_server, m1, m2, m3, m6), pk_s,
+               k_c_of(k), iv_c_of(k), cid', phase_data_exchange, role_server)))).
+
+(* Server *)
+let server(pk_s: bitstring, sk_s: bitstring, k_stk: bitstring, current_time_s: bitstring,
+    scfg_t_pub: bitstring, sec_s: exponent,
+    IP_s: bitstring, port_s: bitstring) =
+  let (scid: bitstring, pub_s: bitstring, expy: bitstring, prof: bitstring) = scfg_t_pub in
+  (* corruption *) Ocorrupt(pk_s, (sk_s, k_stk, sec_s)) |
+  (* Initial Key Agreement *)
+    (* m1 *)
+  in(c, m1: bitstring);
+    (* m2 = s_reject(m1) *)
+  let (IP_c: bitstring, =IP_s, port_c: bitstring, =port_s, cid: bitstring, =seqno(phase_initial_key_agreement)) = m1 in
+  new iv_stk: bitstring;
+  let stk = (iv_stk, E(k_stk, iv_stk, (IP_c, current_time_s), null)) in
+  let m2 = (IP_s, IP_c, port_s, port_c, cid, seqno(phase_initial_key_agreement), scfg_t_pub, stk) in
+  out(cp, m2);
+  insert conversations((role_server, m1, m2));
+  (* corruption *) Ocorrupt(pk_s, (sk_s, k_stk, sec_s, iv_stk)) |
+    (* m3 *)
+  ! in(c, m3: bitstring);
+    insert conversations((role_server, m1, m2, m3));
+      (* ik := get_i_key_s(m3) *) 
+    let (pkt_info: bitstring, =cid, =seqno(phase_initial_key_agreement),
+	 stk': bitstring, =scid, nonc: bitstring, pub_c: bitstring) = m3 in
+    let (=IP_c, =IP_s, =port_c, =port_s) = pkt_info in
+    let (iv_stk': bitstring, tk: bitstring) = stk' in
+    let (=IP_c, current_time_s': bitstring) = D(k_stk, iv_stk', null, tk) in
+#if FIXED && IP_SPOOFING
+    event server_accept_m3(pk_s, tk, m3);
+#else
+    event server_accept_m3(pk_s, tk, m3);
+#endif /* FIXED && IP_SPOOFING */
+    let (=g, =q, y_c: G) = pub_c in
+    let (ipms: G) = expS(y_c, sec_s) in
+    let ik = xtrct_xpnd(ipms, nonc, cid, m3, n1) in
+    ((* reveal *)
+     Oreveal(cid, phase_initial_data_exchange, role_client, k_s_of(ik)) |
+     Oreveal(cid, phase_initial_data_exchange, role_server, k_c_of(ik)) |
+     (* Initial Data Exchange *)
+     (! Oenc((role_client, m1, m2, m3),
+	     k_c_of(ik), iv_c_of(ik), cid, phase_initial_data_exchange, role_server)) |
+     (! Odec((role_client, m1, m2, m3), pk_s,
+	     k_s_of(ik), iv_s_of(ik), cid, phase_initial_data_exchange, role_client)) |
+     (* Key Agreement *)
+      (* m6 := s_hello(m3, ik, sqn_s) *)
+     new x_s': exponent;
+     (* corruption *) Ocorrupt(pk_s, (sk_s, k_stk, sec_s, iv_stk, x_s')) |
+     let y_s' = exp(g, x_s') in
+     let pub_s' = (g, q, y_s') in
+     let sqn = seqno(phase_key_agreement) in
+     let e = E(k_c_of(ik), (iv_c_of(ik), sqn), (scfg_t_pub, pub_s', stk'), (cid, sqn)) in
+     let m6 = (IP_s, IP_c, port_s, port_c, ((cid, sqn), e)) in
+     let pms = expS(y_c, x_s') in
+#if FIXED && SERVER_IMPERSONATION
+     event server_k_set((role_server, m3, m6), cid);
+#else
+     event server_k_set((role_server, m1, m2, m3, m6), cid);
+#endif /* FIXED && SERVER_IMPERSONATION */
+     out(c, m6);
+     insert conversations((role_server, m1, m2, m3, m6));
+       (* k  := get_key_s(m6) *)
+     let k = xtrct_xpnd(pms, nonc, cid, m6, n0) in
+     ((* reveal *)
+       Oreveal(cid, phase_data_exchange, role_client, k_s_of(k)) |
+       Oreveal(cid, phase_data_exchange, role_server, k_c_of(k)) |
+      (* Data Exchange *)
+      (! Oenc((role_client, m1, m2, m3, m6),
+	      k_c_of(k), iv_c_of(k), cid, phase_data_exchange, role_server)) |
+      (! Odec((role_client, m1, m2, m3, m6), pk_s,
+	      k_s_of(k), iv_s_of(k), cid, phase_data_exchange, role_client)))).
+
+(* tap m2 and m3 *)
+let tap_m2 =
+  ((! in(cp, m2: bitstring);                                      (* capture m2 *)
+      let (IP_s: bitstring, IP_c: bitstring, port_s: bitstring, port_c: bitstring,
+           cid: bitstring, n: bitstring, scfg_t_pub: bitstring, stk: bitstring) = m2 in
+      let (iv_stk: bitstring, tk: bitstring) = stk in
+#if FIXED && IP_SPOOFING
+      event capture_m2(tk);
+#else
+      event capture_m2(m2);
+#endif /*  FIXED && IP_SPOOFING */
+      out(cp, m2))
+  |(! in(c, m2: bitstring); out(cp, m2))).                          (* inject m2 *)
+
+(* *)
+process
+    (! new rg: bitstring;
+       (! new k_stk: bitstring;
+          out(c, pk(rg));
+          (**)       
+          ! in(c, IP_s: bitstring);
+            in(c, port_s: bitstring);
+                (* The following line allows the attacker to make a server use scfg_t_pub many times. *)
+          ! in(c, current_time_s: bitstring);
+            (* scfg_gen *)
+            let y_s = exp(g, x_s(rg, current_time_s)) in
+            let sec_s = x_s(rg, current_time_s) in
+            let pub_s = (g, q, y_s) in
+            let str = str_qscfg in
+            let expy: bitstring = s(current_time_s) in
+            let scid = Hash((pub_s, expy)) in
+            new r: nonce_t;
+            let prof = Sign(sk(rg), (str_qscfg, n0, scid, pub_s, expy), r) in
+            let scfg_t_pub = (scid, pub_s, expy, prof) in
+            server(pk(rg), sk(rg), k_stk, current_time_s, scfg_t_pub, sec_s, IP_s, port_s))
+       | (! in(c, IP_c: bitstring);
+            in(c, IP_s: bitstring);
+            in(c, port_c: bitstring);
+            in(c, port_s: bitstring);
+            client(pk(rg), IP_c, IP_s, port_c, port_s))
+       | tap_m2)
