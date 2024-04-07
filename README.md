@@ -1,13 +1,7 @@
 # ProVerif script for formal verification of the QUIC protocol
 
 This archive contains the ProVerif script for analyzing the QACCE security
-of the QUIC protocol. This result was first presented at the following conference.
-  Sakurada, H., Yoneyama, K., Hanatani, Y., Yoshida, M. (2016).
-  Analyzing and Fixing the QACCE Security of QUIC.
-  In: Chen, L., McGrew, D., Mitchell, C. (eds) Security 
-  Standardisation Research. SSR 2016.
-  Lecture Notes in Computer Science(), vol 10074. Springer, Cham.
-  https://doi.org/10.1007/978-3-319-49100-4_1
+of the QUIC protocol. This result was first presented at [1]. 
 The script contanied here is the updated version.
 
 In our analysis, we divide the QACCE security into a number of properties
@@ -61,3 +55,10 @@ are as follows:
   4) 569[min] (275[min] with -DFIXED),
   4') with -DNO_DH_COMM (ommitting associativity)
        7[min] (  5[min] with -DFIXED))
+
+[1]   Sakurada, H., Yoneyama, K., Hanatani, Y., Yoshida, M. (2016).
+  Analyzing and Fixing the QACCE Security of QUIC.
+  In: Chen, L., McGrew, D., Mitchell, C. (eds) Security 
+  Standardisation Research. SSR 2016.
+  Lecture Notes in Computer Science(), vol 10074. Springer, Cham.
+  https://doi.org/10.1007/978-3-319-49100-4_1
