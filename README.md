@@ -1,1 +1,1 @@
-ProVerif script for formal verification of the QUIC protocol
+# ProVerif script for formal verification of the QUIC protocol
